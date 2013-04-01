@@ -1,0 +1,4 @@
+[
+	{ "caption": "Premake: Generate", "command": "premake", "args": {"operation": "generate"} },
+	{ "caption": "Premake: Clean",   "command": "premake", "args": {"operation": "clean"} }
+]
