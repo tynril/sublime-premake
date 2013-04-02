@@ -80,6 +80,11 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		self.configuration = self.configurations[configurationIndex]
 		self.configurations = None
 
+		# Sets the configuration setting in memory as well.
+		if len(self.window.views()) > 0:
+			projectSettings = self.window.views()[0].settings()
+			projectSettings.set("premake_configuration", self.configuration)
+
 		# Look for a project settings file.
 		filesList = os.listdir(self.window.folders()[0])
 		projFileFound = False
@@ -91,7 +96,6 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		# If there's no project file, no way to save the configuration.
 		if not projFileFound:
 			return
-
 		# Otherwise, let's load it...
 		projFilePath = os.path.join(self.window.folders()[0], projFile)
 		projFileDesc = open(projFilePath, 'r')
