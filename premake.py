@@ -1,6 +1,5 @@
 import sublime, sublime_plugin
-import os
-import subprocess
+import os, re, subprocess
 try:
 	import json
 except ImportError:
@@ -23,8 +22,14 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 			self._select_configuration()
 		elif operation == "make":
 			self._run_make()
+		elif operation == "select_run_target":
+			self._select_run_target()
 		elif operation == "run":
-			print "Not yet implemented."
+			self._run_executable()
+		elif operation == "make_and_run":
+			self._run_make()
+			# TODO We must wait for the make to complete... And run only if it was successful.
+			self._run_executable()
 		else:
 			raise RuntimeError("Unknown operation '" + operation + "'.")
 
@@ -32,12 +37,149 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		"""Run the premake4 executable with the given arguments."""
 		self.window.run_command("exec", {"cmd": ["premake4", "--file=" + self._get_premake_filepath()] + args})
 
+	def _run_make(self):
+		"""Run GNU make to build the project."""
+
+		# Run make on the given configuration, if there's one.
+		command = ["make"]
+		configuration = self._get_project_setting("premake_configuration")
+		if configuration:
+			command += ["config=" + configuration]
+
+		self.window.run_command("exec", {"cmd": command, "working_dir": os.path.dirname(self._get_premake_filepath())})
+
+	def _run_executable(self):
+		"""Run the executable that was built during the last build."""
+
+		# Get the run target.
+		self._load_configurations_and_projects()
+		runTarget = self._get_project_setting("premake_run_target")
+
+		# If there's none, let's ask the user to select one.
+		if not runTarget:
+			self.run_target_after_select = True
+			self._select_run_target()
+		else:
+			# Otherwise, let's run it!
+			self._run_target(runTarget)
+
+	def _select_run_target(self):
+		"""Provides the user with a list of available runnable targets."""
+		# Load the data.
+		self._load_configurations_and_projects()
+
+		# List all executable targets.
+		executablesInfo = []
+		for t in self.targets:
+			targetInfo = self.target[t]
+			if targetInfo['is_executable']:
+				executablesInfo.append(targetInfo)
+
+		# Ask the user about those targets.
+		self.run_target_candidates = [i['name'] for i in executablesInfo]
+		self.window.show_quick_panel(self.run_target_candidates, self._run_target_selected)
+
+	def _run_target_selected(self, runTargetIndex):
+		"""Called when the user has chosen a target to run."""
+		if runTargetIndex == -1:
+			self.run_target_candidates = None
+			return
+
+		# We know our build target!
+		runTarget = self.run_target_candidates[runTargetIndex]
+		self.run_target_candidates = None
+
+		# Updates the project file (if possible).
+		self._set_project_setting("premake_run_target", runTarget)
+
+		# Run it if necessary.
+		if hasattr(self, 'run_target_after_select') and self.run_target_after_select:
+			self.run_target_after_select = False
+			self._run_target(runTarget)
+
+	def _run_target(self, target):
+		"""Run the given target executable."""
+		configuration = self._get_project_setting("premake_configuration")
+		execPath = os.path.abspath(os.path.join(os.path.dirname(self._get_premake_filepath()), self.target[target][configuration]['target']))
+		self.window.run_command("exec", {"cmd": [execPath]})
+
 	def _select_configuration(self):
 		"""Provides the user with a list of available configurations."""
 
+		# Load the underlying data.
+		self._load_configurations_and_projects()
+
+		# Make the user choose.		
+		self.window.show_quick_panel(self.configurations, self._configuration_selected)
+
+	def _configuration_selected(self, configurationIndex):
+		"""Called when the user has chosen a configuration."""
+		if configurationIndex == -1:
+			self.configurations = None
+			return
+
+		# We now our configuration!
+		configuration = self.configurations[configurationIndex]
+		self.configurations = None
+
+		# Save it to the project file.
+		self._set_project_setting("premake_configuration", configuration)
+
+	def _get_project_file(self):
+		filesList = os.listdir(self.window.folders()[0])
+		projFileFound = False
+		for projFile in filesList:
+			if projFile[-16:] == ".sublime-project":
+				projFileFound = True
+				break
+
+		if projFileFound:
+			return projFile
+		return None
+
+	def _get_project_setting(self, name):
+		"""Get a value from the project configuration file."""
+		projFile = self._get_project_file()
+		if not projFile:
+			return None
+
+		projFilePath = os.path.join(self.window.folders()[0], projFile)
+		projFileDesc = open(projFilePath, 'r')
+		projJson = json.load(projFileDesc)
+		projFileDesc.close()
+
+		if 'settings' not in projJson:
+			return None
+		if name not in projJson['settings']:
+			return None
+		return projJson['settings'][name]
+
+	def _set_project_setting(self, name, value):
+		"""Set a value in the project configuration file."""
+		projFile = self._get_project_file()
+		if not projFile:
+			return
+
+		projFilePath = os.path.join(self.window.folders()[0], projFile)
+		projFileDesc = open(projFilePath, 'r')
+		projJson = json.load(projFileDesc)
+		projFileDesc.close()
+
+		if 'settings' not in projJson:
+			projJson['settings'] = {}
+		projJson['settings'][name] = value
+
+		# Write the result.
+		projFilePath = os.path.join(self.window.folders()[0], projFile)
+		projFileDesc = open(projFilePath, 'w')
+		json.dump(projJson, projFileDesc, indent = 4)
+		projFileDesc.close()
+
+	def _load_configurations_and_projects(self):
+		"""Executes 'make' to load configurations and projects list, and parse the makefile to get each target info."""
 		# Ensure there's a makefile available.
 		if not os.path.exists(os.path.join(os.path.dirname(self._get_premake_filepath()), "Makefile")):
-			sublime.error_message("Please run 'Premake: Generate' prior to choosing a configuration.")
+			sublime.error_message("Please generate your makefiles (using 'Premake: Generate') before doing that.")
 			return
 
 		# Configure the startup infos to hide the console window on Windows.
@@ -54,93 +196,103 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 		# Parse the result.
 		self.configurations = []
+		self.targets = []
+		self.target = {}
 		(out, _) = proc.communicate()
 		inConf = False
+		inTar = False
 		for line in out.splitlines():
 			if line == "CONFIGURATIONS:":
 				inConf = True
 				continue
+			if line == "TARGETS:":
+				inTar = True
+				continue
+			sline = line.strip()
 			if inConf:
 				if line == "":
 					inConf = False
-					break
-				self.configurations.append(line.strip())
+				else:
+					self.configurations.append(sline)
+			if inTar:
+				if line == "":
+					inTar = False
+				else:
+					if sline in ('all (default)', 'clean'):
+						continue
+					else:
+						self.targets.append(sline)
+						self.target[sline] = self._load_target_info(sline)
 
-		# Make the user choose.		
-		self.window.show_quick_panel(self.configurations, self.__configuration_selected)
+	def _load_target_info(self, target):
+		"""Load information about the given target from its makefile."""
+		
+		# Look for the makefile.
+		makeFile = os.path.join(os.path.dirname(self._get_premake_filepath()), target + ".make")
+		if not os.path.exists(makeFile):
+			sublime.error_message("Please generate your makefiles (using 'Premake: Generate') before doing that.")
 
-	def __configuration_selected(self, configurationIndex):
-		"""Called when the user has chosen a configuration."""
-		if configurationIndex == -1:
-			self.configurations = None
-			self.configuration = None
-			return
+		# Preparing the result object.
+		info = {'name': target}
 
-		# Store the configuration to build in memory.
-		self.configuration = self.configurations[configurationIndex]
-		self.configurations = None
-
-		# Sets the configuration setting in memory as well.
-		if len(self.window.views()) > 0:
-			projectSettings = self.window.views()[0].settings()
-			projectSettings.set("premake_configuration", self.configuration)
-
-		# Look for a project settings file.
-		filesList = os.listdir(self.window.folders()[0])
-		projFileFound = False
-		for projFile in filesList:
-			if projFile[-16:] == ".sublime-project":
-				projFileFound = True
+		# Parsing it.
+		makeFileDesc = open(makeFile, 'r')
+		inConfigBlock = False
+		configBlockName = None
+		while True:
+			line = makeFileDesc.readline()
+			if line == "":
 				break
+			line = line.strip()
 
-		# If there's no project file, no way to save the configuration.
-		if not projFileFound:
-			return
-		# Otherwise, let's load it...
-		projFilePath = os.path.join(self.window.folders()[0], projFile)
-		projFileDesc = open(projFilePath, 'r')
-		projJson = json.load(projFileDesc)
-		projFileDesc.close()
+			# Looking for the configuration switch line.
+			result = re.match(r"^ifeq \(\$\(config\),(\w+)\)$", line)
+			if result:
+				inConfigBlock = True
+				configBlockName = result.group(1)
+				info[configBlockName] = {}
 
-		# Then update it...
-		if 'settings' not in projJson:
-			projJson['settings'] = {}
-		projJson['settings']['premake_configuration'] = self.configuration
+			# Looking for relevant informations inside the configuration block.
+			if inConfigBlock:
+				# End of the configuration block.
+				if line == "endif":
+					inConfigBlock = False
+					continue
 
-		# And then dump it.
-		projFileDesc = open(projFilePath, 'w')
-		json.dump(projJson, projFileDesc, indent = 4)
-		projFileDesc.close()
+				# The TARGETDIR configuration info.
+				result = re.match(r"^TARGETDIR\s*= ([\$\(\)\w\\/\._-]+)$", line)
+				if result:
+					info[configBlockName]['target_dir'] = result.group(1)
+					continue
 
-	def __load_configuration(self):
-		"""Loads the configuration to make from the project file."""
-		if len(self.window.views()) > 0:
-			projectSettings = self.window.views()[0].settings()
-			if projectSettings.has("premake_configuration"):
-				self.configuration = projectSettings.get("premake_configuration")
+				# The TARGET configuration info.
+				result = re.match(r"^TARGET\s*= ([\$\(\)\w\\/\._-]+)$", line)
+				if result:
+					info[configBlockName]['target'] = result.group(1).replace('$(TARGETDIR)', info[configBlockName]['target_dir'])
+					continue
 
-	def _run_make(self):
-		"""Run GNU make to build the project."""
+				# The LDFLAGS configuration info.
+				result = re.match(r"^LDFLAGS\s*\+=(.*)$", line)
+				if result:
+					info['is_shared'] = '-shared' in result.group(1).split(' ')
+					continue
 
-		# Loads the configuration.
-		self.__load_configuration()
+				# The LINKCMD configuration info.
+				result = re.match(r"^LINKCMD\s*= \$\(([A-Z]+)\)", line)
+				if result:
+					info['is_library'] = info['is_shared'] or result.group(1) == 'AR'
+					info['is_executable'] = not info['is_library']
+					continue
+		makeFileDesc.close()
 
-		# Run make on the given configuration, if there's one.
-		command = ["make"]
-		if self.configuration:
-			command += ["config=" + self.configuration]
-
-		self.window.run_command("exec", {"cmd": command, "working_dir": os.path.dirname(self._get_premake_filepath())})
+		return info
 
 	def _get_premake_filepath(self):
 		"""Find the absolute path to the premake build file (not guaranteed to exist)."""
 		premakeFile = None
 
-		# If there's at least one view, we can get the settings for the project.
-		if len(self.window.views()) > 0:
-			projectSettings = self.window.views()[0].settings()
-			if projectSettings.has("premake_file"):
-				premakeFile = projectSettings.get("premake_file")
+		# Attempt to load it from the project file.
+		premakeFile = self._get_project_setting("premake_file")
 
 		# If we don't have it yet, we load it from the default file.
 		if not premakeFile:

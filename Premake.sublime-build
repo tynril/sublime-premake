@@ -6,7 +6,7 @@
 	[
 		{
 			"name": "Run",
-			"operation": "run"
+			"operation": "make_and_run"
 		}
 	]
 }
