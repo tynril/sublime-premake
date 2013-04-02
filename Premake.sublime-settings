@@ -1,0 +1,4 @@
+{
+	// Default file name for the Premake build.
+	"premake_file": "premake4.lua"
+}

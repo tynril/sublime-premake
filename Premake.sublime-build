@@ -1,0 +1,12 @@
+{
+	"target": "premake",
+	"operation": "make",
+
+	"variants":
+	[
+		{
+			"name": "Run",
+			"operation": "run"
+		}
+	]
+}

@@ -1,4 +1,6 @@
 [
-	{ "caption": "Premake: Generate", "command": "premake", "args": {"operation": "generate"} },
-	{ "caption": "Premake: Clean",   "command": "premake", "args": {"operation": "clean"} }
+	{ "caption": "Premake: Generate",				"command": "premake", "args": {"operation": "generate"} },
+	{ "caption": "Premake: Select Configuration",	"command": "premake", "args": {"operation": "select_configuration"} },
+	{ "caption": "Premake: Make",     				"command": "premake", "args": {"operation": "make"} },
+	{ "caption": "Premake: Clean",    				"command": "premake", "args": {"operation": "clean"} }
 ]
