@@ -4,7 +4,6 @@ try:
 	import json
 except ImportError:
 	import simplejson as json
-execcmd = __import__("exec")
 
 class PremakeCommand(sublime_plugin.WindowCommand):
 	"""Deal with premake build file generation."""
@@ -39,6 +38,8 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 			self._run_executable()
 		elif operation == "make_and_run":
 			self._run_make(wait = True)
+		elif operation == "help":
+			self._print_help()
 		else:
 			raise RuntimeError("Unknown operation '" + operation + "'.")
 
@@ -76,6 +77,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 			thread.start_new_thread(self._read_make_stdout, ())
 
 	def _read_make_stdout(self):
+		"""(To be run in a thread) Read and forward the standard output of the running make process."""
 		while True:
 			data = os.read(self.makeProc.stdout.fileno(), 2**15)
 
@@ -87,6 +89,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 				break
 
 	def _append_make_data(self, data):
+		"""Append data from the running make process to the output view."""
 		# Decode the data.
 		try:
 			str = data.decode("utf-8")
@@ -204,12 +207,14 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		self._set_project_setting("premake_configuration", configuration)
 
 	def _get_project_folder(self):
+		"""Get the path to the current project root folder."""
 		folders = self.window.folders()
 		if len(folders) == 0:
 			return None
 		return folders[0]
 
 	def _get_project_file(self):
+		"""Get the name of the project file in the current project."""
 		filesList = os.listdir(self._get_project_folder())
 		projFileFound = False
 		for projFile in filesList:
@@ -394,21 +399,19 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		return premakeFile
 
 	def _print_help(self):
-		help = \
-"""Welcome to the Premake plugin!
+		"""Open a new view to display the plugin help."""
+		help_view = self.window.new_file()
+		help_view.set_name("Premake Plugin Help")
 
-To use the Premake plugin, you must:
- - Have a project opened.
-     The Premake plugin uses your project settings file to get and store important
-     settings, such as the premake build file path.
- - Have a premake build file.
-     This file is named "premake4.lua" and is to be saved in the same directory
-     than the project settings file. If you want, you can change this path by
-     defining the "premake_file" property in your project file, this path will be
-     used instead.
+		# Get the help content from the readme file.
+		readme_file = open('readme.md', 'r')
+		help_text = readme_file.read(2**16).decode('utf-8')
+		help_text = help_text.replace("\r\n", "\n").replace("\r", "\n")
+		readme_file.close()
 
-Once those this is configured, you can use the Premake plugin to generate the
-Makefile for your project, to build one of the project defined in your premake
-build file, in the configuration of your choice, and to run it as well, using the
-Premake build system which is integrated."""
-		self.window.run_command("exec", {"cmd": ["echo", help], "quiet": True})
+		# Put it in the view.
+		edit = help_view.begin_edit()
+		help_view.insert(edit, 0, help_text)
+		help_view.end_edit(edit)
+		help_view.set_read_only(True)
+		help_view.set_scratch(True)
