@@ -4,16 +4,24 @@ try:
 	import json
 except ImportError:
 	import simplejson as json
+execcmd = __import__("exec")
 
 class PremakeCommand(sublime_plugin.WindowCommand):
 	"""Deal with premake build file generation."""
 
 	def is_enabled(self):
 		"""Check if the plugin is enabled in the current context."""
-		return os.path.exists(self._get_premake_filepath())
+		return self._get_project_folder() is not None and os.path.exists(self._get_premake_filepath())
 
 	def run(self, operation):
 		"""Called when operating the plugin."""
+		# Checking if the project is enabled.
+		if not self.is_enabled():
+			sublime.error_message("Sorry!\nThe Premake plugin needs a project and a premake file to be used.\n")
+			self._print_help()
+			return
+
+		# Processing the operation.
 		if operation == "generate":
 			self._run_premake(["gmake"])
 		elif operation == "clean":
@@ -27,8 +35,9 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		elif operation == "run":
 			self._run_executable()
 		elif operation == "make_and_run":
-			self._run_make()
-			# TODO We must wait for the make to complete... And run only if it was successful.
+			print "STARTING MAKE"
+			self._run_make(wait = True)
+			print "MAKE COMPLETE"
 			self._run_executable()
 		else:
 			raise RuntimeError("Unknown operation '" + operation + "'.")
@@ -37,7 +46,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		"""Run the premake4 executable with the given arguments."""
 		self.window.run_command("exec", {"cmd": ["premake4", "--file=" + self._get_premake_filepath()] + args})
 
-	def _run_make(self):
+	def _run_make(self, wait = False):
 		"""Run GNU make to build the project."""
 
 		# Run make on the given configuration, if there's one.
@@ -46,7 +55,18 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		if configuration:
 			command += ["config=" + configuration]
 
-		self.window.run_command("exec", {"cmd": command, "working_dir": os.path.dirname(self._get_premake_filepath())})
+		# Use the standard command if we shouldn't wait for the result.
+		if not wait:
+			self.window.run_command("exec", {"cmd": command, "working_dir": os.path.dirname(self._get_premake_filepath())})
+			return
+
+		# Otherwise, things gets a little bit more complicated.
+		process = execcmd.AsyncProcess(command, os.environ, None)
+		print process
+		print process.proc
+		print process.proc.wait
+		process.proc.wait()
+		print "Kikoo"
 
 	def _run_executable(self):
 		"""Run the executable that was built during the last build."""
@@ -125,8 +145,14 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		# Save it to the project file.
 		self._set_project_setting("premake_configuration", configuration)
 
+	def _get_project_folder(self):
+		folders = self.window.folders()
+		if len(folders) == 0:
+			return None
+		return folders[0]
+
 	def _get_project_file(self):
-		filesList = os.listdir(self.window.folders()[0])
+		filesList = os.listdir(self._get_project_folder())
 		projFileFound = False
 		for projFile in filesList:
 			if projFile[-16:] == ".sublime-project":
@@ -143,7 +169,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		if not projFile:
 			return None
 
-		projFilePath = os.path.join(self.window.folders()[0], projFile)
+		projFilePath = os.path.join(self._get_project_folder(), projFile)
 		projFileDesc = open(projFilePath, 'r')
 		projJson = json.load(projFileDesc)
 		projFileDesc.close()
@@ -160,7 +186,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		if not projFile:
 			return
 
-		projFilePath = os.path.join(self.window.folders()[0], projFile)
+		projFilePath = os.path.join(self._get_project_folder(), projFile)
 		projFileDesc = open(projFilePath, 'r')
 		projJson = json.load(projFileDesc)
 		projFileDesc.close()
@@ -170,7 +196,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		projJson['settings'][name] = value
 
 		# Write the result.
-		projFilePath = os.path.join(self.window.folders()[0], projFile)
+		projFilePath = os.path.join(self._get_project_folder(), projFile)
 		projFileDesc = open(projFilePath, 'w')
 		json.dump(projJson, projFileDesc, indent = 4)
 		projFileDesc.close()
@@ -305,6 +331,26 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 		# Convert the path to an absolute path, if necessary.
 		if not os.path.isabs(premakeFile):
-			premakeFile = os.path.abspath(os.path.join(self.window.folders()[0], premakeFile))
+			premakeFile = os.path.abspath(os.path.join(self._get_project_folder(), premakeFile))
 
 		return premakeFile
+
+	def _print_help(self):
+		help = \
+"""Welcome to the Premake plugin!
+
+To use the Premake plugin, you must:
+ - Have a project opened.
+     The Premake plugin uses your project settings file to get and store important
+     settings, such as the premake build file path.
+ - Have a premake build file.
+     This file is named "premake4.lua" and is to be saved in the same directory
+     than the project settings file. If you want, you can change this path by
+     defining the "premake_file" property in your project file, this path will be
+     used instead.
+
+Once those this is configured, you can use the Premake plugin to generate the
+Makefile for your project, to build one of the project defined in your premake
+build file, in the configuration of your choice, and to run it as well, using the
+Premake build system which is integrated."""
+		self.window.run_command("exec", {"cmd": ["echo", help], "quiet": True})
