@@ -1,5 +1,5 @@
 import sublime, sublime_plugin
-import os, re, subprocess
+import os, re, subprocess, thread, functools
 try:
 	import json
 except ImportError:
@@ -21,6 +21,9 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 			self._print_help()
 			return
 
+		# Setting the output view.
+		self.output_view = self.window.get_output_panel("exec")
+
 		# Processing the operation.
 		if operation == "generate":
 			self._run_premake(["gmake"])
@@ -35,10 +38,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		elif operation == "run":
 			self._run_executable()
 		elif operation == "make_and_run":
-			print "STARTING MAKE"
 			self._run_make(wait = True)
-			print "MAKE COMPLETE"
-			self._run_executable()
 		else:
 			raise RuntimeError("Unknown operation '" + operation + "'.")
 
@@ -48,6 +48,8 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 	def _run_make(self, wait = False):
 		"""Run GNU make to build the project."""
+
+		sublime.status_message("Running make...")
 
 		# Run make on the given configuration, if there's one.
 		command = ["make"]
@@ -60,13 +62,68 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 			self.window.run_command("exec", {"cmd": command, "working_dir": os.path.dirname(self._get_premake_filepath())})
 			return
 
-		# Otherwise, things gets a little bit more complicated.
-		process = execcmd.AsyncProcess(command, os.environ, None)
-		print process
-		print process.proc
-		print process.proc.wait
-		process.proc.wait()
-		print "Kikoo"
+		# Otherwise, run it and wait on it.
+		startupInfo = None
+		if os.name == 'nt':
+			startupInfo = subprocess.STARTUPINFO()
+			startupInfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+		# Run the make subprocess.
+		self.makeProc = subprocess.Popen(command, startupinfo = startupInfo, stderr = subprocess.STDOUT, stdout = subprocess.PIPE, cwd = os.path.dirname(self._get_premake_filepath()))
+
+		# Starts a thread to read the standard output.
+		if self.makeProc.stdout:
+			thread.start_new_thread(self._read_make_stdout, ())
+
+	def _read_make_stdout(self):
+		while True:
+			data = os.read(self.makeProc.stdout.fileno(), 2**15)
+
+			if data != "":
+				sublime.set_timeout(functools.partial(self._append_make_data, data), 0)
+			else:
+				self.makeProc.stdout.close()
+				sublime.set_timeout(functools.partial(self._make_completed), 10)
+				break
+
+	def _append_make_data(self, data):
+		# Decode the data.
+		try:
+			str = data.decode("utf-8")
+		except:
+			str = "[Decode error - output not utf-8]\n"
+
+		# Normalize newlines, Sublime Text always uses a single \n separator
+		# in memory.
+		str = str.replace('\r\n', '\n').replace('\r', '\n')
+
+		# Show the panel if necessary.
+		show_panel_on_build = sublime.load_settings("Preferences.sublime-settings").get("show_panel_on_build", True)
+		if show_panel_on_build:
+			self.window.run_command("show_panel", {"panel": "output.exec"})
+
+		# Append the text at the end of the view.
+		selection_was_at_end = (len(self.output_view.sel()) == 1
+			and self.output_view.sel()[0]
+				== sublime.Region(self.output_view.size()))
+		self.output_view.set_read_only(False)
+		edit = self.output_view.begin_edit()
+		self.output_view.insert(edit, self.output_view.size(), str)
+		if selection_was_at_end:
+			self.output_view.show(self.output_view.size())
+		self.output_view.end_edit(edit)
+		self.output_view.set_read_only(True)
+
+	def _make_completed(self):
+		"""Called when the 'make' process has finished running."""
+
+		# Getting the exit code.
+		exitCode = self.makeProc.poll()
+		self.makeProc = None
+
+		# Running the executable if the build succeeded.
+		if exitCode == 0:
+			self._run_executable()
 
 	def _run_executable(self):
 		"""Run the executable that was built during the last build."""
@@ -119,6 +176,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 	def _run_target(self, target):
 		"""Run the given target executable."""
+		sublime.status_message("Running target...")
 		configuration = self._get_project_setting("premake_configuration")
 		execPath = os.path.abspath(os.path.join(os.path.dirname(self._get_premake_filepath()), self.target[target][configuration]['target']))
 		self.window.run_command("exec", {"cmd": [execPath]})
