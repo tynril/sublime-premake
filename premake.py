@@ -404,7 +404,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		help_view.set_name("Premake Plugin Help")
 
 		# Get the help content from the readme file.
-		readme_file = open('readme.md', 'r')
+		readme_file = open(os.path.join(sublime.packages_path(), "Premake", "readme.md"), 'r')
 		help_text = readme_file.read(2**16).decode('utf-8')
 		help_text = help_text.replace("\r\n", "\n").replace("\r", "\n")
 		readme_file.close()
