@@ -1,9 +1,13 @@
 import sublime, sublime_plugin
-import os, re, subprocess, thread, functools
+import os, re, subprocess, functools, inspect
 try:
 	import json
 except ImportError:
 	import simplejson as json
+try:
+	import thread
+except ImportError:
+	import _thread
 
 class PremakeCommand(sublime_plugin.WindowCommand):
 	"""Deal with premake build file generation."""
@@ -25,7 +29,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 		# Processing the operation.
 		if operation == "generate":
-			self._run_premake(["gmake"])
+			self._generate_and_load_makefiles()
 		elif operation == "clean":
 			self._run_premake(["clean"])
 		elif operation == "select_configuration":
@@ -45,6 +49,9 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 	def _run_premake(self, args):
 		"""Run the premake4 executable with the given arguments."""
+
+		sublime.status_message("Running premake...")
+
 		self.window.run_command("exec", {"cmd": ["premake4", "--file=" + self._get_premake_filepath()] + args})
 
 	def _run_make(self, wait = False):
@@ -94,7 +101,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		try:
 			str = data.decode("utf-8")
 		except:
-			str = "[Decode error - output not utf-8]\n"
+			str = data
 
 		# Normalize newlines, Sublime Text always uses a single \n separator
 		# in memory.
@@ -110,11 +117,9 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 			and self.output_view.sel()[0]
 				== sublime.Region(self.output_view.size()))
 		self.output_view.set_read_only(False)
-		edit = self.output_view.begin_edit()
-		self.output_view.insert(edit, self.output_view.size(), str)
+		self.output_view.run_command("print_text", {"string": str})
 		if selection_was_at_end:
 			self.output_view.show(self.output_view.size())
-		self.output_view.end_edit(edit)
 		self.output_view.set_read_only(True)
 
 	def _make_completed(self):
@@ -190,7 +195,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		# Load the underlying data.
 		self._load_configurations_and_projects()
 
-		# Make the user choose.		
+		# Make the user choose.
 		self.window.show_quick_panel(self.configurations, self._configuration_selected)
 
 	def _configuration_selected(self, configurationIndex):
@@ -264,10 +269,48 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		json.dump(projJson, projFileDesc, indent = 4)
 		projFileDesc.close()
 
+	def _generate_and_load_makefiles(self):
+		"""Executes 'premake4 gmake' and catches the output to get a list of generated makefiles."""
+
+		# Configure the startup infos to hide the console window on Windows.
+		startupInfo = None
+		if os.name == 'nt':
+			startupInfo = subprocess.STARTUPINFO()
+			startupInfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+		# Run "make help" to get configurations list.
+		proc = subprocess.Popen(["premake4", "--file=" + self._get_premake_filepath(), "gmake"], startupinfo = startupInfo, stderr = subprocess.STDOUT, stdout = subprocess.PIPE, cwd = os.path.dirname(self._get_premake_filepath()))
+		retVal = proc.wait()
+		if retVal != 0:
+			raise RuntimeError("Unable to run premake to generate Makefiles.")
+
+		# Parse the result.
+		self.makefiles = []
+		self.targetfiles = {}
+		(out, _) = proc.communicate()
+		inAct = False
+		for line in out.splitlines():
+			line = line.decode("utf-8")
+			self._append_make_data(line + "\n")
+			if line == "Running action 'gmake'...":
+				inAct = True
+				continue
+			if inAct:
+				result = re.match(r"^Generating (.*)\.\.\.$", line)
+				if result:
+					filePath = result.group(1)
+					if filePath == 'Makefile':
+						self.makefiles.append(filePath)
+					else:
+						targetName = os.path.basename(filePath)
+						if targetName == 'Makefile':
+							targetName = os.path.basename(os.path.dirname(filePath)) + ".make"
+						self.targetfiles[targetName] = filePath
+
 	def _load_configurations_and_projects(self):
 		"""Executes 'make' to load configurations and projects list, and parse the makefile to get each target info."""
 		# Ensure there's a makefile available.
-		if not os.path.exists(os.path.join(os.path.dirname(self._get_premake_filepath()), "Makefile")):
+		if not os.path.exists(self._get_makefile_filepath()):
 			sublime.error_message("Please generate your makefiles (using 'Premake: Generate') before doing that.")
 			return
 
@@ -291,6 +334,7 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 		inConf = False
 		inTar = False
 		for line in out.splitlines():
+			line = line.decode("utf-8")
 			if line == "CONFIGURATIONS:":
 				inConf = True
 				continue
@@ -315,9 +359,9 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 	def _load_target_info(self, target):
 		"""Load information about the given target from its makefile."""
-		
+
 		# Look for the makefile.
-		makeFile = os.path.join(os.path.dirname(self._get_premake_filepath()), target + ".make")
+		makeFile = self._get_targetfile_filepath(target + ".make")
 		if not os.path.exists(makeFile):
 			sublime.error_message("Please generate your makefiles (using 'Premake: Generate') before doing that.")
 
@@ -398,20 +442,56 @@ class PremakeCommand(sublime_plugin.WindowCommand):
 
 		return premakeFile
 
+	def _get_makefile_filepath(self):
+		"""Get the path to the makefile generated by Premake."""
+
+		if hasattr(self, 'makefiles') and len(self.makefiles) > 0:
+			filePath = self.makefiles[0]
+			if not os.path.exists(filePath):
+				filePath = os.path.join(self._get_project_folder(), filePath)
+			return filePath
+		else:
+			return os.path.join(os.path.dirname(self._get_premake_filepath()), 'Makefile')
+
+	def _get_targetfile_filepath(self, targetfile):
+		"""Get the path to the target file generated by Premake."""
+
+		if hasattr(self, 'targetfiles') and targetfile in self.targetfiles:
+			filePath = self.targetfiles[targetfile]
+			if not os.path.exists(filePath):
+				filePath = os.path.join(self._get_project_folder(), filePath)
+			return filePath
+		else:
+			return os.path.join(os.path.dirname(self._get_premake_filepath()), targetfile)
+
 	def _print_help(self):
 		"""Open a new view to display the plugin help."""
 		help_view = self.window.new_file()
 		help_view.set_name("Premake Plugin Help")
 
 		# Get the help content from the readme file.
-		readme_file = open(os.path.join(sublime.packages_path(), "Premake", "readme.md"), 'r')
-		help_text = readme_file.read(2**16).decode('utf-8')
-		help_text = help_text.replace("\r\n", "\n").replace("\r", "\n")
-		readme_file.close()
+		helpFilePath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "readme.md")
+		if not os.path.exists(helpFilePath):
+			helpFilePath = os.path.join(sublime.packages_path(), "sublime-premake", "readme.md")
+		if os.path.exists(helpFilePath):
+			readme_file = open(helpFilePath, 'r')
+			help_text = readme_file.read(2**16)
+			try:
+				help_text = help_text.decode('utf-8')
+			except:
+				pass
+			help_text = help_text.replace("\r\n", "\n").replace("\r", "\n")
+			readme_file.close()
+		else:
+			help_text = "You can find help about this plugin on https://github.com/tynril/sublime-premake"
 
 		# Put it in the view.
-		edit = help_view.begin_edit()
-		help_view.insert(edit, 0, help_text)
-		help_view.end_edit(edit)
+		help_view.run_command('print_text', {'string': help_text})
 		help_view.set_read_only(True)
 		help_view.set_scratch(True)
+
+class PrintTextCommand(sublime_plugin.TextCommand):
+	"""A command to write the plugin help to the buffer."""
+
+	def run(self, edit, string=''):
+		self.view.insert(edit, self.view.size(), string)
